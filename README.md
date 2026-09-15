@@ -189,9 +189,21 @@ it yourself and let gradle finish:
 ```bash
 cp target/aarch64-linux-android/release/libhyperjournal_lib.so \
    gen/android/app/src/main/jniLibs/arm64-v8a/
+cp "$NDK_HOME/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+   gen/android/app/src/main/jniLibs/arm64-v8a/
 cd gen/android
 ./gradlew assembleArm64Release -x rustBuildArm64Release
 # -> app/build/outputs/apk/arm64/release/app-arm64-release.apk
+```
+
+The second copy is not optional. whisper.cpp is C++, so the library links
+against the NDK's `libc++_shared.so`, which is not part of Android — nothing
+on the device provides it. Ship it or the app dies inside `System.loadLibrary`
+before it draws anything. Check the APK rather than trusting the copy:
+
+```bash
+unzip -l app/build/outputs/apk/arm64/release/app-arm64-release.apk | grep '[.]so'
+# both libraries, or the APK is broken
 ```
 
 Signing comes from `gen/android/keystore.properties`, which is gitignored along
