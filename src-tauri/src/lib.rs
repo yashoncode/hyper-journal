@@ -1,3 +1,7 @@
+pub mod paths;
+pub mod vision;
+pub mod llm;
+pub mod settings;
 pub mod journal;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
