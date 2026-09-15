@@ -2,10 +2,10 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hyperjournal</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%238294B4' stroke-width='2.5'/%3E%3Ccircle cx='12' cy='16' r='5' fill='%23E9C46A'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="app.css">
 
 <header class="bar">
-  <a class="brand" href="/">
+  <a class="brand" href="index.html">
     <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
       <circle cx="16" cy="16" r="13" fill="none" stroke="#8294B4" stroke-width="2.5"/>
       <circle cx="12" cy="16" r="5" fill="#E9C46A"/>
@@ -13,8 +13,8 @@
     <span>Hyperjournal</span>
   </a>
   <nav class="nav">
-    <a href="/" aria-current="page">Today</a>
-    <a href="/settings">Settings</a>
+    <a href="index.html" aria-current="page">Today</a>
+    <a href="settings.html">Settings</a>
   </nav>
 </header>
 
@@ -49,6 +49,9 @@
 </main>
 
 <script>
+// The Rust side, rather than a server on a port.
+const { invoke } = window.__TAURI__.core;
+
 const VOICE = "Hyperjournal";
 const v = document.getElementById("v"), off = document.getElementById("off");
 const hello = document.getElementById("hello"), read = document.getElementById("read");
@@ -132,7 +135,7 @@ gbtn.onclick = async () => {
   gbtn.disabled = true; thread.innerHTML = ""; done = false;
   const pending = turn(VOICE, "thinking", "pending");
   try {
-    const r = await (await fetch("/greet", {method: "POST"})).json();
+    const r = await invoke("greet");
     pending.remove();
     if (r.error) { turn(VOICE, r.error, "pending"); gbtn.disabled = false; return; }
     turn(VOICE, r.text);
@@ -163,7 +166,7 @@ async function startTalking() {
     turn("You", heard.text);
 
     const think = turn(VOICE, "thinking", "pending");
-    const r = await (await fetch("/say", {method: "POST", body: JSON.stringify({text: heard.text})})).json();
+    const r = await invoke("say", {text: heard.text});
     think.remove();
     if (r.error) { turn(VOICE, r.error, "pending"); return; }
     if (r.text) { turn(VOICE, r.text); await say(r.text); }
@@ -201,7 +204,7 @@ addEventListener("keyup", e => {
 
 sbtn.onclick = async () => {
   sbtn.disabled = true; tbtn.disabled = true;
-  const r = await (await fetch("/save", {method: "POST"})).json();
+  const r = await invoke("save");
   turn(VOICE, r.error ? r.error
        : r.confirmed ? "Saved, in your words: “" + r.self_reported + "”."
                      : "Saved, and left blank. You didn't say anything, so I put nothing in your mouth.",
@@ -229,7 +232,7 @@ cbtn.onclick = async () => {
     return;
   }
   cbtn.textContent = "Clear"; cbtn.classList.remove("danger");
-  await fetch("/discard", {method: "POST"});
+  await invoke("discard");
   reset();
 };
 
@@ -254,7 +257,7 @@ function transcript(body) {
 
 async function loadJournal() {
   const list = document.getElementById("journal");
-  const rows = await (await fetch("/entries")).json();
+  const rows = await invoke("entries");
   document.getElementById("ecount").textContent = rows.length
     ? "Your journal, " + rows.length + (rows.length === 1 ? " entry" : " entries")
     : "Your journal";
@@ -295,8 +298,7 @@ document.getElementById("journal").addEventListener("click", async ev => {
     holder.append(no, yes);
     no.onclick = () => loadJournal();
     yes.onclick = async () => {
-      const r = await (await fetch("/delete", {method: "POST",
-        body: JSON.stringify({path: del.dataset.del})})).json();
+      const r = await invoke("delete_entry", {path: del.dataset.del});
       if (r.error) { holder.textContent = r.error; return; }
       loadJournal();
     };
@@ -316,14 +318,14 @@ async function watch() {
 }
 
 async function boot() {
-  const c = await (await fetch("/config")).json();
+  const c = await invoke("config");
   name = c.settings.HYPERJOURNAL_NAME || "";
   const h = new Date().getHours();
   const part = h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
   hello.textContent = name ? part + ", " + name + "." : part + ".";
   setupDone = Boolean(c.key_set && c.settings.NVIDIA_MODEL && name);
   if (!setupDone) {
-    read.innerHTML = 'A few things are still unset. <a href="/settings">Finish setting up</a> ' +
+    read.innerHTML = 'A few things are still unset. <a href="settings.html">Finish setting up</a> ' +
                      'and it will speak in its own words. Until then it uses fixed ones.';
   }
 }
