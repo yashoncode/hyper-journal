@@ -1,0 +1,27 @@
+[package]
+name = "hyperjournal"
+version = "0.1.0"
+description = "A local journal that listens, watches, and remembers"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "hyperjournal_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.3", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+tauri-plugin-log = "2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

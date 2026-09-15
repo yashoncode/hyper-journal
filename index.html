@@ -1,0 +1,338 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hyperjournal</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%238294B4' stroke-width='2.5'/%3E%3Ccircle cx='12' cy='16' r='5' fill='%23E9C46A'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css">
+
+<header class="bar">
+  <a class="brand" href="/">
+    <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
+      <circle cx="16" cy="16" r="13" fill="none" stroke="#8294B4" stroke-width="2.5"/>
+      <circle cx="12" cy="16" r="5" fill="#E9C46A"/>
+    </svg>
+    <span>Hyperjournal</span>
+  </a>
+  <nav class="nav">
+    <a href="/" aria-current="page">Today</a>
+    <a href="/settings">Settings</a>
+  </nav>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="lens">
+      <video id="v" autoplay playsinline muted></video>
+      <p class="off" id="off">Camera off</p>
+    </div>
+    <div>
+      <h1 class="greeting" id="hello">Hello.</h1>
+      <p class="read" id="read"></p>
+      <div class="start">
+        <button id="greet" class="go">Start</button>
+        <button id="talk" class="quiet" hidden>Hold to talk</button>
+        <button id="save" class="quiet" hidden>Save entry</button>
+        <button id="clear" class="link" hidden>Clear</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="talk" id="talkwrap" hidden>
+    <div class="thread" id="thread"></div>
+    <p class="aside">Hold the button, or the spacebar, while you answer. Your voice is turned
+      into words on this machine and thrown away. Nothing is recorded.</p>
+  </section>
+
+  <section class="entries">
+    <h2 id="ecount">Your journal</h2>
+    <div id="journal"></div>
+  </section>
+</main>
+
+<script>
+const VOICE = "Hyperjournal";
+const v = document.getElementById("v"), off = document.getElementById("off");
+const hello = document.getElementById("hello"), read = document.getElementById("read");
+const gbtn = document.getElementById("greet"), tbtn = document.getElementById("talk"),
+      sbtn = document.getElementById("save"), cbtn = document.getElementById("clear"),
+      thread = document.getElementById("thread"),
+      talkwrap = document.getElementById("talkwrap");
+const cap = document.createElement("canvas"), cctx = cap.getContext("2d");
+
+let recorder = null, chunks = [], speaking = false, done = false, name = "", setupDone = true;
+
+const esc = t => String(t === null || t === undefined ? "" : t)
+  .replace(/[<>&]/g, c => ({"<": "&lt;", ">": "&gt;", "&": "&amp;"}[c]));
+
+/* ---- what the camera makes of you, in words only ---- */
+// The model re-reads your face many times a second, and a line that rewrites
+// itself that often is unreadable and looks unsure of itself. A new wording has
+// to hold for five seconds before another one can replace it.
+const HOLD_MS = 5000;
+let shownRead = null, shownAt = 0;
+
+function setRead(html) {
+  const now = performance.now();
+  if (html === shownRead) return;
+  if (shownRead !== null && now - shownAt < HOLD_MS) return;
+  shownRead = html; shownAt = now;
+  read.innerHTML = html;
+}
+
+function render(r) {
+  if (!setupDone) return;
+  if (!r.box) {
+    setRead(r.faces > 1 ? "There's more than one face here, so I'll wait." : "");
+    return;
+  }
+  setRead(r.phrase
+    ? esc(r.phrase) + "<small>That's a guess, and it is often wrong. Tell me if it is.</small>"
+    : "<small>I can't read your face well just now, which is fine. Tell me yourself.</small>");
+}
+
+/* ---- conversation ---- */
+function turn(who, text, cls) {
+  talkwrap.hidden = false;
+  const d = document.createElement("div");
+  d.className = "turn fadein " + (cls || (who === VOICE ? "them" : "me"));
+  const tag = document.createElement("span");
+  tag.className = "who"; tag.textContent = who === VOICE ? VOICE : (name || "You");
+  const p = document.createElement("p");
+  p.textContent = text;
+  d.append(tag, p);
+  thread.appendChild(d);
+  return d;
+}
+
+// The browser's own voice: offline, native, nothing to download.
+function say(text) {
+  return new Promise(res => {
+    if (!window.speechSynthesis) return res();
+    speaking = true; tbtn.disabled = true;
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.02;
+    const voice = speechSynthesis.getVoices().find(x => /Natural|Aria|Jenny|Google UK/i.test(x.name));
+    if (voice) u.voice = voice;
+    let settled = false;
+    // guard interval: the speakers are still ringing, and the transcriber would
+    // happily take Hyperjournal's own sentence down as your reply
+    const finish = () => {
+      if (settled) return;
+      settled = true; clearTimeout(watchdog);
+      setTimeout(() => { speaking = false; tbtn.disabled = done; res(); }, 300);
+    };
+    // speech drops onend on some machines, and on a machine with no voices it
+    // never speaks at all. Without this, Hold to talk stays dead forever.
+    const watchdog = setTimeout(finish, Math.max(4000, text.length * 90));
+    u.onend = finish; u.onerror = finish;
+    speechSynthesis.speak(u);
+  });
+}
+
+gbtn.onclick = async () => {
+  gbtn.disabled = true; thread.innerHTML = ""; done = false;
+  const pending = turn(VOICE, "thinking", "pending");
+  try {
+    const r = await (await fetch("/greet", {method: "POST"})).json();
+    pending.remove();
+    if (r.error) { turn(VOICE, r.error, "pending"); gbtn.disabled = false; return; }
+    turn(VOICE, r.text);
+    tbtn.hidden = false; sbtn.hidden = false; cbtn.hidden = false;
+    tbtn.disabled = false; sbtn.disabled = false;
+    gbtn.textContent = "Start over";
+    await say(r.text);
+  } catch (e) {
+    pending.querySelector("p").textContent = "Something went wrong reaching the journal.";
+    gbtn.disabled = false;
+  }
+};
+
+async function startTalking() {
+  if (speaking || done || recorder || tbtn.hidden || tbtn.disabled) return;
+  const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+  chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => chunks.push(e.data);
+  recorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());       // let go of the microphone at once
+    const blob = new Blob(chunks, {type: recorder.mimeType});
+    recorder = null;
+    const pending = turn("You", "listening back", "pending");
+    const heard = await (await fetch("/listen", {method: "POST", body: blob})).json();
+    pending.remove();
+    if (!heard.text) { turn(VOICE, "I didn't catch that. Hold the button while you speak.", "pending"); return; }
+    turn("You", heard.text);
+
+    const think = turn(VOICE, "thinking", "pending");
+    const r = await (await fetch("/say", {method: "POST", body: JSON.stringify({text: heard.text})})).json();
+    think.remove();
+    if (r.error) { turn(VOICE, r.error, "pending"); return; }
+    if (r.text) { turn(VOICE, r.text); await say(r.text); }
+    if (r.done) { done = true; tbtn.disabled = true; sbtn.classList.add("go"); sbtn.classList.remove("quiet"); }
+  };
+  recorder.start();
+  tbtn.classList.add("rec"); tbtn.classList.remove("quiet"); tbtn.textContent = "Listening, let go when done";
+}
+
+function stopTalking() {
+  if (!recorder) return;
+  recorder.stop();
+  tbtn.classList.remove("rec"); tbtn.classList.add("quiet"); tbtn.textContent = "Hold to talk";
+}
+
+tbtn.addEventListener("mousedown", startTalking);
+tbtn.addEventListener("touchstart", e => { e.preventDefault(); startTalking(); });
+addEventListener("mouseup", stopTalking);
+addEventListener("touchend", stopTalking);
+
+// Space is push-to-talk, so it must never also scroll the page or re-press a
+// focused button. The old check asked whether the event target was the body,
+// which stopped being true the moment you clicked Start, and the page scrolled.
+const typing = e => /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || e.target.isContentEditable;
+addEventListener("keydown", e => {
+  if (e.code !== "Space" || typing(e)) return;
+  e.preventDefault();
+  if (!e.repeat) startTalking();
+});
+addEventListener("keyup", e => {
+  if (e.code !== "Space" || typing(e)) return;
+  e.preventDefault();
+  stopTalking();
+});
+
+sbtn.onclick = async () => {
+  sbtn.disabled = true; tbtn.disabled = true;
+  const r = await (await fetch("/save", {method: "POST"})).json();
+  turn(VOICE, r.error ? r.error
+       : r.confirmed ? "Saved, in your words: “" + r.self_reported + "”."
+                     : "Saved, and left blank. You didn't say anything, so I put nothing in your mouth.",
+       "pending");
+  setTimeout(reset, 2600);
+  loadJournal();
+};
+
+// Clearing throws away a conversation that was never written down. That is
+// cheap to redo and impossible to un-save, so it only asks once you have
+// actually said something.
+function reset() {
+  thread.innerHTML = ""; talkwrap.hidden = true;
+  tbtn.hidden = true; sbtn.hidden = true; cbtn.hidden = true;
+  sbtn.classList.add("quiet"); sbtn.classList.remove("go");
+  done = false; gbtn.disabled = false; gbtn.textContent = "Start";
+}
+
+cbtn.onclick = async () => {
+  const spoke = thread.querySelectorAll(".turn.me").length > 0;
+  if (spoke && cbtn.textContent === "Clear") {
+    cbtn.textContent = "Clear it, unsaved";
+    cbtn.classList.add("danger");
+    setTimeout(() => { cbtn.textContent = "Clear"; cbtn.classList.remove("danger"); }, 4000);
+    return;
+  }
+  cbtn.textContent = "Clear"; cbtn.classList.remove("danger");
+  await fetch("/discard", {method: "POST"});
+  reset();
+};
+
+/* ---- your journal ---- */
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function dateLabel(iso) {
+  const parts = String(iso || "").split("-");
+  return parts.length === 3 ? Number(parts[2]) + " " + MONTHS[Number(parts[1]) - 1] : esc(iso);
+}
+
+// The file on disk is Markdown, so it still reads in a text editor in a year.
+// On screen it should look like the conversation it actually was.
+function transcript(body) {
+  const turns = String(body || "").split(/\n{2,}/).filter(Boolean).map(chunk => {
+    const m = chunk.match(/^\*\*(.+?):\*\*\s*([\s\S]*)$/);
+    if (!m) return '<div class="turn"><p>' + esc(chunk) + "</p></div>";
+    return '<div class="turn ' + (m[1] === VOICE ? "them" : "me") + '">' +
+           '<span class="who">' + esc(m[1]) + "</span><p>" + esc(m[2]) + "</p></div>";
+  });
+  return '<div class="script">' + turns.join("") + "</div>";
+}
+
+async function loadJournal() {
+  const list = document.getElementById("journal");
+  const rows = await (await fetch("/entries")).json();
+  document.getElementById("ecount").textContent = rows.length
+    ? "Your journal, " + rows.length + (rows.length === 1 ? " entry" : " entries")
+    : "Your journal";
+  if (!rows.length) {
+    list.innerHTML = '<p class="blank">Nothing here yet. Press Start, and say how the day actually went.</p>';
+    return;
+  }
+  list.innerHTML = rows.map(e =>
+    '<article class="entry">' +
+    '<div class="when">' + dateLabel(e.date) + "<em>" + esc(e.time) + "</em></div><div>" +
+    '<h3 class="said' + (e.confirmed ? "" : " none") + '">' +
+      (e.confirmed ? esc(e.self_reported) : "you said nothing") + "</h3>" +
+    (e.summary ? '<p class="sum">' + esc(e.summary) + "</p>" : "") +
+    ((e.themes || []).length ? '<div class="tags">' +
+      e.themes.map(t => '<span class="tag">' + esc(t) + "</span>").join("") + "</div>" : "") +
+    (e.thought ? '<p class="thought">' + esc(e.thought) + "</p>" : "") +
+    (e.song ? '<p class="song">A song for it: <a target="_blank" rel="noreferrer" href="' +
+       "https://www.youtube.com/results?search_query=" +
+       encodeURIComponent(e.song.title + " " + e.song.artist) + '">' +
+       esc(e.song.title) + " — " + esc(e.song.artist) + "</a>" +
+       (e.song.why ? "<em>" + esc(e.song.why) + "</em>" : "") + "</p>" : "") +
+    "<details><summary><span>Read it</span></summary>" + transcript(e.body) + "</details>" +
+    '<div class="rowacts"><button class="link" data-del="' + esc(e.path) + '">Delete</button></div>' +
+    "</div></article>").join("");
+}
+
+// Deleting an entry is not undoable, so the confirm replaces the button in place
+// rather than firing a dialog you can dismiss by reflex.
+document.getElementById("journal").addEventListener("click", async ev => {
+  const del = ev.target.closest("[data-del]");
+  if (del) {
+    const holder = del.parentElement;
+    holder.innerHTML = '<span class="askdel">Move this entry to journal/trashed?</span>';
+    const no = document.createElement("button");
+    no.className = "link"; no.textContent = "Keep it";
+    const yes = document.createElement("button");
+    yes.className = "link danger"; yes.textContent = "Delete";
+    holder.append(no, yes);
+    no.onclick = () => loadJournal();
+    yes.onclick = async () => {
+      const r = await (await fetch("/delete", {method: "POST",
+        body: JSON.stringify({path: del.dataset.del})})).json();
+      if (r.error) { holder.textContent = r.error; return; }
+      loadJournal();
+    };
+  }
+});
+
+/* ---- the camera, quietly ---- */
+async function watch() {
+  const W = 480, H = Math.round(480 * v.videoHeight / v.videoWidth);
+  cap.width = W; cap.height = H;
+  for (;;) {
+    cctx.drawImage(v, 0, 0, W, H);
+    const blob = await new Promise(r => cap.toBlob(r, "image/jpeg", 0.7));
+    try { render(await (await fetch("/analyze", {method: "POST", body: blob})).json()); }
+    catch (e) { /* server restarting; keep going */ }
+  }
+}
+
+async function boot() {
+  const c = await (await fetch("/config")).json();
+  name = c.settings.HYPERJOURNAL_NAME || "";
+  const h = new Date().getHours();
+  const part = h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
+  hello.textContent = name ? part + ", " + name + "." : part + ".";
+  setupDone = Boolean(c.key_set && c.settings.NVIDIA_MODEL && name);
+  if (!setupDone) {
+    read.innerHTML = 'A few things are still unset. <a href="/settings">Finish setting up</a> ' +
+                     'and it will speak in its own words. Until then it uses fixed ones.';
+  }
+}
+
+boot();
+loadJournal();
+if (window.speechSynthesis) speechSynthesis.getVoices();
+
+navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+  .then(s => { v.srcObject = s; off.remove(); v.onloadedmetadata = watch; })
+  .catch(() => { off.textContent = "No camera. Everything else still works."; });
+</script>
