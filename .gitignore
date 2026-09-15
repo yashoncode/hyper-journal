@@ -5,3 +5,4 @@ calib.json
 identities.json
 __pycache__/
 .env
+dist/
