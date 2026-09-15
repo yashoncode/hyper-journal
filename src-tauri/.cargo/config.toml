@@ -3,9 +3,20 @@
 LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
 # whisper.cpp is built with cmake. This is a user-scope install because the
 # machine-wide MSI needs elevation; change it if yours lives elsewhere.
+# Cross-compiling whisper.cpp for Android. Without these, cmake picks the host
+# Visual Studio generator and tries to build an arm64 Android library with
+# MSBuild. TARGET_ applies only when host != target, so the desktop build is
+# untouched.
+# bindgen runs clang directly and otherwise looks for stdbool.h in the host
+# sysroot, which has nothing for Android in it.
+BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android = "--target=aarch64-linux-android24 --sysroot=C:/Users/Yashwanth/AppData/Local/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+TARGET_CMAKE_GENERATOR = "Ninja"
+TARGET_CMAKE_TOOLCHAIN_FILE = "C:/Users/Yashwanth/hyperjournal/src-tauri/android-toolchain.cmake"
 CMAKE = "C:/Users/Yashwanth/AppData/Local/Microsoft/WinGet/Packages/Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe/cmake-4.4.3-windows-x86_64/bin/cmake.exe"
 
 [target.aarch64-linux-android]
+# see android-stubs/README.md
+rustflags = ["-L", "C:/Users/Yashwanth/hyperjournal/src-tauri/android-stubs"]
 linker = "C:/Users/Yashwanth/AppData/Local/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd"
 
 [target.armv7-linux-androideabi]
