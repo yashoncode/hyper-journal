@@ -1,0 +1,9 @@
+# Never line-ending-convert these: git was rewriting the empty archive and the
+# ONNX weights as if they were text.
+*.a      binary
+*.onnx   binary
+*.jks    binary
+*.bin    binary
+*.png    binary
+*.ico    binary
+*.icns   binary
