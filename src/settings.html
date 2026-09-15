@@ -3,18 +3,29 @@
 <title>Settings · Hyperjournal</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%238294B4' stroke-width='2.5'/%3E%3Ccircle cx='12' cy='16' r='5' fill='%23E9C46A'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="app.css">
+<script>
+// Before first paint, or the dark ground flashes on a light theme. Follows the
+// system until you pick one, then remembers what you picked.
+(function () {
+  var stored = null;
+  try { stored = localStorage.getItem("hyperjournal-theme"); } catch (e) {}
+  document.documentElement.dataset.theme = stored ||
+    (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+})();
+</script>
 
 <header class="bar">
   <a class="brand" href="index.html">
     <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
-      <circle cx="16" cy="16" r="13" fill="none" stroke="#8294B4" stroke-width="2.5"/>
-      <circle cx="12" cy="16" r="5" fill="#E9C46A"/>
+      <circle cx="16" cy="16" r="13" fill="none" stroke="var(--machine)" stroke-width="2.5"/>
+      <circle cx="12" cy="16" r="5" fill="var(--you)"/>
     </svg>
     <span>Hyperjournal</span>
   </a>
   <nav class="nav">
     <a href="index.html">Today</a>
     <a href="settings.html" aria-current="page">Settings</a>
+    <button id="theme" class="link theme" type="button" aria-label="Switch theme"></button>
   </nav>
 </header>
 
@@ -191,4 +202,16 @@ wipe.onclick = () => {
 };
 
 loadConfig();
+
+/* ---- theme ---- */
+const themeBtn = document.getElementById("theme");
+function paintTheme(next) {
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("hyperjournal-theme", next); } catch (e) {}
+  // the button says where it takes you, not where you are
+  themeBtn.textContent = next === "dark" ? "Light" : "Dark";
+}
+paintTheme(document.documentElement.dataset.theme || "dark");
+themeBtn.onclick = () =>
+  paintTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 </script>

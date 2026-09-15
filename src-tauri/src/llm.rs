@@ -17,13 +17,17 @@ pub const SUGGESTED_MODEL: &str = "deepseek-ai/deepseek-v4-flash-0731";
 /// are part of the behaviour rather than a tuning detail.
 ///
 /// Someone is sitting there waiting to be spoken to, and NIM's free tier queues
-/// unpredictably (5-65s observed), so the two calls a person waits on fail fast.
-/// Nobody is waiting on the extraction, so it gets the time to return real
-/// metadata instead of a canned blank.
+/// unpredictably (5-65s observed), so every call a person waits on fails fast.
+///
+/// Extraction used to get 45s and a retry, on the reasoning that nobody was
+/// waiting for it. That was wrong: it runs when you press Save, and you watch
+/// the button the whole time. With the endpoint queueing, that reasoning cost
+/// ninety seconds of a greyed-out button before falling back to a blank
+/// summary it could have written immediately.
 const GREET: Budget = Budget { timeout: 12, tries: 1 };
 const REPLY: Budget = Budget { timeout: 15, tries: 1 };
-const EXTRACT: Budget = Budget { timeout: 45, tries: 2 };
-const SONG: Budget = Budget { timeout: 25, tries: 1 };
+const EXTRACT: Budget = Budget { timeout: 22, tries: 1 };
+const SONG: Budget = Budget { timeout: 22, tries: 1 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Budget {
@@ -500,12 +504,16 @@ mod tests {
     }
 
     #[test]
-    fn the_latency_budget_is_part_of_the_behaviour() {
-        // a person is waiting on these two
+    fn nothing_a_person_waits_on_may_take_longer_than_half_a_minute() {
         assert_eq!(GREET, Budget { timeout: 12, tries: 1 });
         assert_eq!(REPLY, Budget { timeout: 15, tries: 1 });
-        // nobody is waiting on this one, so it gets time to return real metadata
-        assert!(EXTRACT.timeout >= 45 && EXTRACT.tries == 2);
+        // Save waits on both of these at once, so the slower one is the wait.
+        // A single try each: a retry cannot finish inside the deadline
+        // commands::save puts on them, so it would only burn the budget.
+        for budget in [EXTRACT, SONG] {
+            assert_eq!(budget.tries, 1, "{budget:?}");
+            assert!(budget.timeout <= 30, "{budget:?}");
+        }
     }
 
     #[tokio::test]

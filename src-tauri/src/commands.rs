@@ -25,6 +25,14 @@ use tauri::{AppHandle, State};
 /// ~20 minutes of frames, then it stops accumulating.
 const MAX_READINGS: usize = 4000;
 
+/// How long saving may wait on the model before it writes the entry anyway.
+///
+/// The summary, the themes and the song are niceties. The transcript is the
+/// entry, it is already in memory, and it cannot be held hostage to an endpoint
+/// that is queueing. Whatever has not answered by now degrades to the person's
+/// own words, which is what it would have degraded to eventually.
+const ENRICH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
+
 #[derive(Default)]
 pub struct Session {
     pub turns: Vec<(String, String)>,
@@ -325,14 +333,34 @@ pub async fn save(app: AppHandle, state: State<'_, Shared>) -> Result<Value, ()>
 
     let spoke = turns.iter().any(|(who, _)| who != VOICE);
     // both of these are slow and neither needs the other's answer, so they wait
-    // together rather than one behind the other
-    let (extracted, song) = if spoke {
-        let (a, b) = tokio::join!(llm.extract(&turns), llm.suggest_song(&turns));
-        (a, b)
+    // together rather than one behind the other -- and neither may hold up the
+    // entry past the deadline, because the transcript is already in hand and it
+    // is the transcript that is the journal
+    let (data, source, song) = if spoke {
+        let enrich = async { tokio::join!(llm.extract(&turns), llm.suggest_song(&turns)) };
+        match tokio::time::timeout(ENRICH_DEADLINE, enrich).await {
+            Ok(((data, source), song)) => (data, source, song),
+            Err(_) => {
+                // their own first words stand in, and nothing is invented
+                let first = turns
+                    .iter()
+                    .find(|(who, _)| who != VOICE)
+                    .map_or("", |(_, said)| said.as_str());
+                (
+                    llm::Extracted {
+                        self_reported: llm::in_their_words(first, 60),
+                        themes: Vec::new(),
+                        summary: String::new(),
+                    },
+                    "canned (slow)".to_string(),
+                    None,
+                )
+            }
+        }
     } else {
-        (llm.extract(&turns).await, None)
+        let (data, source) = llm.extract(&turns).await;
+        (data, source, None)
     };
-    let (data, source) = extracted;
 
     // the person said nothing: the entry records the hypothesis and says so.
     // self_reported is left out entirely rather than backfilled from the guess.
