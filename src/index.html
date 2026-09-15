@@ -312,8 +312,12 @@ async function watch() {
   for (;;) {
     cctx.drawImage(v, 0, 0, W, H);
     const blob = await new Promise(r => cap.toBlob(r, "image/jpeg", 0.7));
-    try { render(await (await fetch("/analyze", {method: "POST", body: blob})).json()); }
-    catch (e) { /* server restarting; keep going */ }
+    // the bytes go over as bytes, not as a JSON array of numbers
+    try { render(await invoke("analyze", new Uint8Array(await blob.arrayBuffer()))); }
+    catch (e) { /* models still loading; keep going */ }
+    // Ten frames a second. The reading is smoothed across frames and the wording
+    // holds for five seconds, so a faster loop only costs battery.
+    await new Promise(r => setTimeout(r, 100));
   }
 }
 

@@ -7,8 +7,9 @@
 //! Expected failures come back as `{"error": "..."}` rather than a rejected
 //! promise, which is the shape the frontend already checks for.
 
+use crate::detect::{self, Detector};
 use crate::journal::{self, Hypothesis, NewEntry};
-use crate::llm::{Llm, VOICE};
+use crate::llm::{self, Llm, VOICE};
 use crate::paths;
 use crate::settings::{self, Settings};
 use crate::vision;
@@ -19,6 +20,9 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use tauri::{AppHandle, State};
 
+
+/// ~20 minutes of frames, then it stops accumulating.
+const MAX_READINGS: usize = 4000;
 
 #[derive(Default)]
 pub struct Session {
@@ -38,6 +42,9 @@ pub struct App {
     /// A list while capturing a baseline, else None.
     pub collecting: Option<Vec<Vec<f32>>>,
     pub last: Option<(String, f64)>,
+    /// Both ONNX models, built on the first frame rather than at startup, so
+    /// opening the app does not wait two seconds for a camera nobody may use.
+    pub detector: Option<Detector>,
 }
 
 impl App {
@@ -50,6 +57,7 @@ impl App {
             baseline,
             collecting: None,
             last: None,
+            detector: None,
         }
     }
 
@@ -352,6 +360,109 @@ pub async fn save(app: AppHandle, state: State<'_, Shared>) -> Result<Value, ()>
         "song": song,
         "source": source,
     }))
+}
+
+// --- the camera ---------------------------------------------------------------
+
+/// One frame in, one hypothesis out.
+///
+/// The frame arrives as raw JPEG bytes over the IPC boundary rather than as a
+/// JSON array of numbers, which at several frames a second is the difference
+/// between a preview and a slideshow. Nothing is written to disk at either end:
+/// the bytes live in one call and are dropped.
+#[tauri::command]
+pub fn analyze(app: AppHandle, state: State<'_, Shared>, request: tauri::ipc::Request<'_>) -> Value {
+    let tauri::ipc::InvokeBody::Raw(jpeg) = request.body() else {
+        return err("expected a frame");
+    };
+    let Ok(frame) = image::load_from_memory(jpeg) else {
+        return err("bad frame");
+    };
+    let frame = frame.to_rgb8();
+
+    let mut a = state.lock().unwrap();
+    if a.detector.is_none() {
+        match Detector::new() {
+            Ok(d) => a.detector = Some(d),
+            Err(e) => return err(format!("could not load the models: {e}")),
+        }
+    }
+    let detector = a.detector.as_mut().unwrap();
+    let Ok(faces) = detector.faces(&frame) else {
+        return err("could not read the frame");
+    };
+    let Some(face) = detect::subject(&faces).copied() else {
+        return json!({ "box": Value::Null, "faces": 0 });
+    };
+    let Some(cut) = detect::crop(&frame, &face) else {
+        return json!({ "box": Value::Null, "faces": faces.len() });
+    };
+    let Ok(logits) = a.detector.as_mut().unwrap().emotion(&cut) else {
+        return err("could not read the frame");
+    };
+
+    let raw = vision::softmax(&logits);
+    a.probs = a
+        .probs
+        .iter()
+        .zip(&raw)
+        .map(|(p, r)| vision::EMA * p + (1.0 - vision::EMA) * r)
+        .collect();
+
+    let mut remaining = 0usize;
+    if let Some(collecting) = a.collecting.as_mut() {
+        collecting.push(raw.clone());
+        remaining = vision::BASELINE_FRAMES.saturating_sub(collecting.len());
+        if remaining == 0 {
+            let frames = a.collecting.take().unwrap();
+            let mean: Vec<f32> = (0..vision::LABELS.len())
+                .map(|i| frames.iter().map(|f| f[i]).sum::<f32>() / frames.len() as f32)
+                .collect();
+            save_baseline(&app, &mean);
+            a.baseline = Some(mean);
+        }
+    }
+
+    let shown = vision::calibrate(&a.probs, a.baseline.as_deref());
+    let top = vision::argmax(&shown);
+    let label = vision::LABELS[top];
+    let confidence = shown[top] as f64;
+    a.last = Some((label.to_string(), confidence));
+
+    // while you are talking, keep watching. One reading at hello is a thin
+    // record of a conversation; the shape of it over five minutes is not.
+    if let Some(session) = a.session.as_mut() {
+        if session.readings.len() < MAX_READINGS {
+            session.readings.push(shown.clone());
+        }
+    }
+
+    let sure = confidence >= a.settings.floor();
+    let round4 = |v: f32| (v as f64 * 10000.0).round() / 10000.0;
+    json!({
+        // a sentence, not a number: nobody journalling wants to read "sad 0.42",
+        // and a number invites belief the model has not earned
+        "phrase": if sure { llm::looks_like(label) } else { "" },
+        "box": [face.x, face.y, face.w, face.h],
+        "frame": [frame.width(), frame.height()],
+        "faces": faces.len(),
+        "probs": vision::LABELS.iter().zip(&shown).map(|(k, v)| (*k, round4(*v))).collect::<BTreeMap<_, _>>(),
+        "raw": vision::LABELS.iter().zip(&raw).map(|(k, v)| (*k, round4(*v))).collect::<BTreeMap<_, _>>(),
+        "label": label,
+        "confidence": round4(shown[top]),
+        "sure": sure,
+        "calibrated": a.baseline.is_some(),
+        "remaining": remaining,
+    })
+}
+
+fn save_baseline(app: &AppHandle, baseline: &[f32]) {
+    let path = paths::calibration_path(app);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let body = json!({ "baseline": baseline, "labels": vision::LABELS });
+    let _ = std::fs::write(path, serde_json::to_vec_pretty(&body).unwrap_or_default());
 }
 
 // --- calibration ------------------------------------------------------------

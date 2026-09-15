@@ -1,6 +1,7 @@
 //! Hyperjournal: a local journal that listens, watches, and remembers.
 
 pub mod commands;
+pub mod detect;
 pub mod journal;
 pub mod llm;
 pub mod paths;
@@ -65,6 +66,7 @@ pub fn run() {
             commands::save,
             commands::start_baseline,
             commands::clear_baseline,
+            commands::analyze,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
