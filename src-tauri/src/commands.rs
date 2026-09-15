@@ -12,6 +12,7 @@ use crate::journal::{self, Hypothesis, NewEntry};
 use crate::llm::{self, Llm, VOICE};
 use crate::paths;
 use crate::settings::{self, Settings};
+use crate::stt::{self, Speech};
 use crate::vision;
 use chrono::{Local, Timelike};
 use serde::Serialize;
@@ -45,6 +46,8 @@ pub struct App {
     /// Both ONNX models, built on the first frame rather than at startup, so
     /// opening the app does not wait two seconds for a camera nobody may use.
     pub detector: Option<Detector>,
+    /// The speech model, fetched in the background at startup.
+    pub speech: Speech,
 }
 
 impl App {
@@ -58,6 +61,7 @@ impl App {
             collecting: None,
             last: None,
             detector: None,
+            speech: Speech::Fetching(0.0),
         }
     }
 
@@ -454,6 +458,32 @@ pub fn analyze(app: AppHandle, state: State<'_, Shared>, request: tauri::ipc::Re
         "calibrated": a.baseline.is_some(),
         "remaining": remaining,
     })
+}
+
+/// Audio in, text out, and the samples are dropped.
+///
+/// The body is four bytes of sample rate followed by the raw f32 samples the
+/// page took off the audio graph. Nothing is written to disk at either end.
+#[tauri::command]
+pub fn listen(state: State<'_, Shared>, request: tauri::ipc::Request<'_>) -> Value {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return err("expected audio");
+    };
+    if body.len() < 4 {
+        return json!({ "text": "" });
+    }
+    let rate = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+    let samples: Vec<f32> = body[4..]
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+
+    let a = state.lock().unwrap();
+    let Speech::Ready(speech) = &a.speech else {
+        return a.speech.status();
+    };
+    let pcm = stt::resample(&samples, rate);
+    json!({ "text": speech.transcribe(&pcm) })
 }
 
 fn save_baseline(app: &AppHandle, baseline: &[f32]) {

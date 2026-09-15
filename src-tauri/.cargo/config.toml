@@ -1,3 +1,10 @@
+# bindgen (whisper-rs) needs the C libclang, which nothing else here ships.
+[env]
+LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
+# whisper.cpp is built with cmake. This is a user-scope install because the
+# machine-wide MSI needs elevation; change it if yours lives elsewhere.
+CMAKE = "C:/Users/Yashwanth/AppData/Local/Microsoft/WinGet/Packages/Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe/cmake-4.4.3-windows-x86_64/bin/cmake.exe"
+
 [target.aarch64-linux-android]
 linker = "C:/Users/Yashwanth/AppData/Local/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd"
 

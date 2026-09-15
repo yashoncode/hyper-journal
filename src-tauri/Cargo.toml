@@ -24,6 +24,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1.53.1", features = ["rt", "macros"] }
 ort = { version = "2.0.0-rc.10", features = ["download-binaries"] }
 image = { version = "0.25.6", default-features = false, features = ["jpeg", "png"] }
+whisper-rs = "0.16.0"
+tts = "0.26"
 
 [profile.release]
 opt-level = "z"

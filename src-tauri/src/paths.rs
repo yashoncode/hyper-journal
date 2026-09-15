@@ -19,9 +19,41 @@ use tauri::{AppHandle, Manager};
 /// documents directory at all, which would otherwise leave nowhere to write.
 pub fn journal_root(app: &AppHandle) -> PathBuf {
     match app.path().document_dir() {
-        Ok(dir) => dir.join("Hyperjournal"),
+        Ok(dir) => shared(dir).join("Hyperjournal"),
         Err(_) => data_dir(app).join("journal"),
     }
+}
+
+/// On Android, the *shared* Documents folder rather than this app's own.
+///
+/// Tauri reports `getExternalFilesDir(DIRECTORY_DOCUMENTS)`, which is
+/// `.../Android/data/<package>/files/Documents`: private, invisible to most
+/// file managers since Android 11, and deleted when the app is uninstalled. A
+/// journal that is erased by uninstalling the journal is not a journal, so the
+/// path is walked back to the storage root and the shared folder used instead.
+///
+/// This needs All-files access, which `MainActivity` asks for. Without it the
+/// writes fail and the app stays on the private path, which still works.
+#[cfg(target_os = "android")]
+fn shared(scoped: PathBuf) -> PathBuf {
+    let text = scoped.to_string_lossy().to_string();
+    match text.split_once("/Android/data/") {
+        Some((storage_root, _)) if !storage_root.is_empty() => {
+            let candidate = PathBuf::from(storage_root).join("Documents");
+            // only prefer it if it is actually reachable
+            if std::fs::create_dir_all(&candidate).is_ok() {
+                candidate
+            } else {
+                scoped
+            }
+        }
+        _ => scoped,
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn shared(dir: PathBuf) -> PathBuf {
+    dir
 }
 
 /// App data: the Whisper model and the calibration baseline.

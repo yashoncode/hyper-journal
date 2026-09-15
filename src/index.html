@@ -61,7 +61,7 @@ const gbtn = document.getElementById("greet"), tbtn = document.getElementById("t
       talkwrap = document.getElementById("talkwrap");
 const cap = document.createElement("canvas"), cctx = cap.getContext("2d");
 
-let recorder = null, chunks = [], speaking = false, done = false, name = "", setupDone = true;
+let audio = null, speaking = false, done = false, name = "", setupDone = true;
 
 const esc = t => String(t === null || t === undefined ? "" : t)
   .replace(/[<>&]/g, c => ({"<": "&lt;", ">": "&gt;", "&": "&amp;"}[c]));
@@ -106,16 +106,13 @@ function turn(who, text, cls) {
   return d;
 }
 
-// The browser's own voice: offline, native, nothing to download.
+// The browser's own voice where there is one: offline, native, nothing to
+// download. Android's webview has no Web Speech API, so there the Rust side
+// speaks through the platform engine instead.
 function say(text) {
   return new Promise(res => {
-    if (!window.speechSynthesis) return res();
     speaking = true; tbtn.disabled = true;
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.02;
-    const voice = speechSynthesis.getVoices().find(x => /Natural|Aria|Jenny|Google UK/i.test(x.name));
-    if (voice) u.voice = voice;
-    let settled = false;
+    let settled = false, watchdog;
     // guard interval: the speakers are still ringing, and the transcriber would
     // happily take Hyperjournal's own sentence down as your reply
     const finish = () => {
@@ -123,9 +120,25 @@ function say(text) {
       settled = true; clearTimeout(watchdog);
       setTimeout(() => { speaking = false; tbtn.disabled = done; res(); }, 300);
     };
+
+    // Presence of the API, not the length of the voice list: getVoices() is
+    // commonly empty on the first call while the list is still loading, and a
+    // desktop that has voices would otherwise be sent down the Android path.
+    if (!window.speechSynthesis) {
+      invoke("speak", {text}).catch(() => {});
+      // nothing reports back when the platform engine stops, so this is the
+      // same estimate the watchdog below makes
+      watchdog = setTimeout(finish, Math.max(2000, text.length * 80));
+      return;
+    }
+
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.02;
+    const voice = speechSynthesis.getVoices().find(x => /Natural|Aria|Jenny|Google UK/i.test(x.name));
+    if (voice) u.voice = voice;
     // speech drops onend on some machines, and on a machine with no voices it
     // never speaks at all. Without this, Hold to talk stays dead forever.
-    const watchdog = setTimeout(finish, Math.max(4000, text.length * 90));
+    watchdog = setTimeout(finish, Math.max(4000, text.length * 90));
     u.onend = finish; u.onerror = finish;
     speechSynthesis.speak(u);
   });
@@ -150,36 +163,67 @@ gbtn.onclick = async () => {
 };
 
 async function startTalking() {
-  if (speaking || done || recorder || tbtn.hidden || tbtn.disabled) return;
+  if (speaking || done || audio || tbtn.hidden || tbtn.disabled) return;
   const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-  chunks = [];
-  recorder = new MediaRecorder(stream);
-  recorder.ondataavailable = e => chunks.push(e.data);
-  recorder.onstop = async () => {
-    stream.getTracks().forEach(t => t.stop());       // let go of the microphone at once
-    const blob = new Blob(chunks, {type: recorder.mimeType});
-    recorder = null;
-    const pending = turn("You", "listening back", "pending");
-    const heard = await (await fetch("/listen", {method: "POST", body: blob})).json();
-    pending.remove();
-    if (!heard.text) { turn(VOICE, "I didn't catch that. Hold the button while you speak.", "pending"); return; }
-    turn("You", heard.text);
+  const ctx = new AudioContext();
+  const source = ctx.createMediaStreamSource(stream);
+  // Raw samples rather than MediaRecorder: whisper.cpp wants 16 kHz mono floats,
+  // and taking them straight from the graph means no Opus decoder on the Rust
+  // side. ScriptProcessor is deprecated but is present in every webview this
+  // ships to, including Android's; AudioWorklet needs a separate module file.
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  node.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  // through a silent gain, or the microphone comes straight back out of the
+  // speakers; the node still has to reach the destination to run at all
+  const mute = ctx.createGain();
+  mute.gain.value = 0;
+  source.connect(node); node.connect(mute); mute.connect(ctx.destination);
 
-    const think = turn(VOICE, "thinking", "pending");
-    const r = await invoke("say", {text: heard.text});
-    think.remove();
-    if (r.error) { turn(VOICE, r.error, "pending"); return; }
-    if (r.text) { turn(VOICE, r.text); await say(r.text); }
-    if (r.done) { done = true; tbtn.disabled = true; sbtn.classList.add("go"); sbtn.classList.remove("quiet"); }
-  };
-  recorder.start();
-  tbtn.classList.add("rec"); tbtn.classList.remove("quiet"); tbtn.textContent = "Listening, let go when done";
+  audio = {ctx, stream, node, source, mute, chunks, rate: ctx.sampleRate};
+  tbtn.classList.add("rec"); tbtn.classList.remove("quiet");
+  tbtn.textContent = "Listening, let go when done";
 }
 
-function stopTalking() {
-  if (!recorder) return;
-  recorder.stop();
+async function stopTalking() {
+  if (!audio) return;
+  const {ctx, stream, node, source, mute, chunks, rate} = audio;
+  audio = null;
   tbtn.classList.remove("rec"); tbtn.classList.add("quiet"); tbtn.textContent = "Hold to talk";
+
+  node.disconnect(); source.disconnect(); mute.disconnect();
+  stream.getTracks().forEach(t => t.stop());   // let go of the microphone at once
+  await ctx.close();
+
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const pcm = new Float32Array(total);
+  let at = 0;
+  for (const c of chunks) { pcm.set(c, at); at += c.length; }
+
+  // four bytes of sample rate, then the samples. The rate varies by device, so
+  // the resampling happens once, in Rust, rather than once per platform here.
+  const body = new Uint8Array(4 + pcm.byteLength);
+  new DataView(body.buffer).setUint32(0, rate, true);
+  body.set(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength), 4);
+
+  const pending = turn("You", "listening back", "pending");
+  const heard = await invoke("listen", body);
+  pending.remove();
+  if (heard.status === "fetching") {
+    turn(VOICE, "Still fetching the speech model — " +
+         Math.round((heard.progress || 0) * 100) + "% done. Try again in a moment.", "pending");
+    return;
+  }
+  if (heard.error) { turn(VOICE, heard.error, "pending"); return; }
+  if (!heard.text) { turn(VOICE, "I didn't catch that. Hold the button while you speak.", "pending"); return; }
+  turn("You", heard.text);
+
+  const think = turn(VOICE, "thinking", "pending");
+  const r = await invoke("say", {text: heard.text});
+  think.remove();
+  if (r.error) { turn(VOICE, r.error, "pending"); return; }
+  if (r.text) { turn(VOICE, r.text); await say(r.text); }
+  if (r.done) { done = true; tbtn.disabled = true; sbtn.classList.add("go"); sbtn.classList.remove("quiet"); }
 }
 
 tbtn.addEventListener("mousedown", startTalking);
